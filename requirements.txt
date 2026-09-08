@@ -1,0 +1,27 @@
+# Data handling
+pandas
+numpy
+requests
+beautifulsoup4
+python-dotenv
+
+# Modeling
+scikit-learn
+xgboost
+pymc
+lifelines
+shap
+
+# Optimization
+cvxpy
+scipy
+
+# Notebooks & viz
+jupyter
+matplotlib
+seaborn
+
+# App layer (add when you get there)
+streamlit
+fastapi
+uvicorn
