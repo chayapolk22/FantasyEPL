@@ -45,3 +45,11 @@ A side project exploring FPL through a quantitative finance lens: treating squad
 -  LLM chat wrapper narrating model outputs (no invented numbers)
 -  Chip planner UI
 -  Mini-league dashboard
+
+## Tech stack
+
+- **Modeling:** Python — `pandas`, `numpy`, `scikit-learn`, `xgboost`, `pymc` / `lifelines` (survival analysis), `shap`
+- **Optimization:** `cvxpy` (mean-variance), backward induction / DP for chip timing
+- **Backend:** FastAPI
+- **Frontend:** Streamlit (prototype) → possible migration later
+- **Database:** SQLite (local) → Supabase/Postgres (later)
