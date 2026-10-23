@@ -4,13 +4,13 @@ import pandas as pd
 from build_dataset import COUNT_COLS, add_features, to_gameweeks
 
 
-def make_matches(points_by_round, element=1, minutes=90):
+def make_matches(points_by_round, element=1, minutes=90, season="2026-27"):
     rows = []
     for rnd, pts in points_by_round.items():
         row = {col: 0.0 for col in COUNT_COLS}
         row.update(total_points=pts, minutes=minutes, starts=1,
                    expected_goal_involvements=0.5)
-        row.update(element=element, round=rnd, fixture=rnd, team=1,
+        row.update(code=element, element=element, season=season, round=rnd, fixture=rnd, team=1,
                    value=60, difficulty=3, was_home=True)
         rows.append(row)
     return pd.DataFrame(rows)
@@ -64,3 +64,16 @@ def test_upcoming_row_keeps_empty_target():
 
     assert np.isnan(gw.loc[3, "total_points"])
     assert gw.loc[3, "pts_mean_3"] == 3.5
+
+
+def test_features_roll_over_seasons():
+    """GW1 of a new season uses the end of last season, keyed by player code."""
+    last = make_matches({37: 6, 38: 10}, element=250, season="2025-26")
+    this = make_matches({1: 3}, element=12, season="2026-27")
+    this["code"] = 250  # same player, new season id
+    gw = add_features(to_gameweeks(pd.concat([this, last])))
+
+    gw1 = gw[(gw["season"] == "2026-27") & (gw["round"] == 1)].iloc[0]
+    assert gw1["pts_mean_3"] == 8
+    assert gw1["gws_observed"] == 2
+    assert gw1["element"] == 12

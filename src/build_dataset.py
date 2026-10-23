@@ -22,10 +22,15 @@ gameweeks *before* that row (shift by one), exactly like a backtest that
 only trades on information available at the deadline. Fixture, price and
 home/away are known before the deadline, so they are not lagged.
 
+Past seasons are stacked in front of the current one and players are keyed
+by FPL's stable `code` (season ids change every year), so trailing features
+roll straight over the summer: GW1's form is last season's run-in, the
+information a manager actually had at the GW1 deadline.
+
 Rows for the next, unplayed gameweek are appended with an empty target, so
 the same features can be fed to a model to forecast it.
 
-Run fetch_data.py and fetch_history.py first.
+Run fetch_data.py, fetch_history.py and fetch_past_seasons.py first.
 """
 
 import json
@@ -35,12 +40,18 @@ import numpy as np
 import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-RAW_DIR = DATA_DIR / "raw" / "element_summary"
+RAW_DIR = DATA_DIR / "raw"
 OUT_PATH = DATA_DIR / "player_gw_panel.csv"
 
 # Points for playing 60+ minutes: the return you get just for "holding" a
 # starter, so it plays the role of the risk-free rate in the Sharpe ratio.
 RISK_FREE_PTS = 2
+
+# Older seasons to stack in front of the current one (see fetch_past_seasons.py).
+PAST_SEASONS = ["2025-26"]
+
+# (code, season, round) identifies one player-gameweek across seasons.
+PLAYER_KEY = "code"
 
 # Per-match stats summed into a gameweek (a double gameweek has two matches).
 COUNT_COLS = [
@@ -57,7 +68,13 @@ def load_json(name: str):
         return json.load(f)
 
 
-def load_match_history(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
+def season_label(bootstrap: dict) -> str:
+    """'2026-27' from the year of the first gameweek deadline."""
+    year = int(bootstrap["events"][0]["deadline_time"][:4])
+    return f"{year}-{(year + 1) % 100:02d}"
+
+
+def load_match_history(raw_dir: Path = RAW_DIR / "element_summary") -> pd.DataFrame:
     """Every match row from every saved element-summary file."""
     rows = []
     for path in sorted(raw_dir.glob("*.json")):
@@ -71,6 +88,22 @@ def load_match_history(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
     for col in COUNT_COLS:
         history[col] = pd.to_numeric(history[col])
     return history
+
+
+def load_past_season(season: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """A past season's matches (fixture info attached) and its player list."""
+    season_dir = RAW_DIR / season
+    if not season_dir.exists():
+        raise FileNotFoundError(f"No data in {season_dir} — run fetch_past_seasons.py")
+
+    history = pd.read_csv(season_dir / "merged_gw.csv")
+    for col in COUNT_COLS:
+        history[col] = pd.to_numeric(history[col])
+    history = history.drop(columns=["team", "opponent_team"])
+
+    matches = add_fixture_info(history, pd.read_csv(season_dir / "fixtures.csv"))
+    players = pd.read_csv(season_dir / "players_raw.csv")[["id", "code", "web_name", "element_type"]]
+    return matches, players
 
 
 def add_fixture_info(matches: pd.DataFrame, fixtures: pd.DataFrame) -> pd.DataFrame:
@@ -94,7 +127,7 @@ def upcoming_matches(bootstrap: dict, fixtures: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     next_gw = next_events[0]
 
-    players = pd.DataFrame(bootstrap["elements"])[["id", "team", "now_cost"]]
+    players = pd.DataFrame(bootstrap["elements"])[["id", "code", "team", "now_cost"]]
     gw_fixtures = fixtures[fixtures["event"] == next_gw]
 
     sides = []
@@ -124,6 +157,7 @@ def to_gameweeks(matches: pd.DataFrame) -> pd.DataFrame:
     """Collapse matches into one row per player per gameweek."""
     agg = {col: lambda s: s.sum(min_count=1) for col in COUNT_COLS}
     agg.update({
+        "element": "last",
         "team": "last",
         "value": "last",
         "difficulty": "mean",
@@ -131,17 +165,21 @@ def to_gameweeks(matches: pd.DataFrame) -> pd.DataFrame:
         "fixture": "count",
     })
     gw = (
-        matches.groupby(["element", "round"], as_index=False)
+        matches.groupby([PLAYER_KEY, "season", "round"], as_index=False)
         .agg(agg)
         .rename(columns={"fixture": "n_fixtures", "was_home": "home_share"})
     )
-    return gw.sort_values(["element", "round"], ignore_index=True)
+    return gw.sort_values([PLAYER_KEY, "season", "round"], ignore_index=True)
 
 
 def add_features(gw: pd.DataFrame) -> pd.DataFrame:
-    """Trailing features, each lagged one gameweek per player (no look-ahead)."""
-    gw = gw.sort_values(["element", "round"], ignore_index=True).copy()
-    by_player = gw.groupby("element", group_keys=False)
+    """Trailing features, each lagged one gameweek per player (no look-ahead).
+
+    Windows count a player's gameweeks in order across seasons, so they roll
+    over the summer break.
+    """
+    gw = gw.sort_values([PLAYER_KEY, "season", "round"], ignore_index=True).copy()
+    by_player = gw.groupby(PLAYER_KEY, group_keys=False)
 
     def lagged_rolling(col: str, window: int, stat: str, min_periods: int = 1):
         return by_player[col].transform(
@@ -175,20 +213,37 @@ def add_features(gw: pd.DataFrame) -> pd.DataFrame:
 def build_panel() -> pd.DataFrame:
     bootstrap = load_json("bootstrap_static.json")
     fixtures = pd.DataFrame(load_json("fixtures.json"))
+    current = season_label(bootstrap)
 
+    elements = pd.DataFrame(bootstrap["elements"])
     played = add_fixture_info(load_match_history(), fixtures)
-    matches = pd.concat([played, upcoming_matches(bootstrap, fixtures)], ignore_index=True)
-    panel = add_features(to_gameweeks(matches))
+    played = played.merge(elements[["id", "code"]], left_on="element", right_on="id").drop(columns="id")
+    current_matches = pd.concat([played, upcoming_matches(bootstrap, fixtures)], ignore_index=True)
 
-    players = pd.DataFrame(bootstrap["elements"])[["id", "web_name", "element_type"]]
+    # Each season has its own element ids, names and positions; keep them all.
+    match_frames = [current_matches.assign(season=current)]
+    player_frames = [elements[["id", "code", "web_name", "element_type"]].assign(season=current)]
+    for season in PAST_SEASONS:
+        past_matches, past_players = load_past_season(season)
+        past_matches = past_matches.merge(
+            past_players[["id", "code"]], left_on="element", right_on="id"
+        ).drop(columns="id")
+        match_frames.append(past_matches.assign(season=season))
+        player_frames.append(past_players.assign(season=season))
+
+    panel = add_features(to_gameweeks(pd.concat(match_frames, ignore_index=True)))
+
+    players = pd.concat(player_frames, ignore_index=True)
     positions = {t["id"]: t["singular_name_short"] for t in bootstrap["element_types"]}
     players["position"] = players["element_type"].map(positions)
     panel = panel.merge(
-        players.drop(columns="element_type"), left_on="element", right_on="id"
+        players[["season", "id", "web_name", "position"]],
+        left_on=["season", "element"], right_on=["season", "id"],
     ).drop(columns="id")
 
-    front = ["element", "web_name", "position", "team", "round", "n_fixtures",
-             "price_m", "difficulty", "home_share"]
+    # team and element are ids within that row's season.
+    front = ["code", "season", "element", "web_name", "position", "team", "round",
+             "n_fixtures", "price_m", "difficulty", "home_share"]
     return panel[front + [c for c in panel.columns if c not in front]]
 
 
@@ -198,8 +253,8 @@ def main():
 
     played = panel["total_points"].notna()
     print(f"Saved {len(panel)} rows to {OUT_PATH}")
-    print(f"  played gameweeks: {panel.loc[played, 'round'].min()}–"
-          f"{panel.loc[played, 'round'].max()} ({played.sum()} rows)")
+    for season, rounds in panel[played].groupby("season")["round"]:
+        print(f"  {season}: GW{rounds.min()}–{rounds.max()} ({len(rounds)} rows)")
     print(f"  upcoming rows to forecast: {(~played).sum()}")
 
 
