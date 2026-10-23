@@ -12,9 +12,13 @@ Quant framing — each player is an asset, each gameweek a period:
   pts_per_m_5         mean / price          -> return per £m of budget
   play_rate_5,
   start_rate_5,
-  mins_mean_3         rotation risk         -> chance the asset pays out at all
+  mins_mean_3,
+  mins60_rate_5,
+  mins_last,
+  start_streak        rotation risk         -> chance the asset pays out at all
   xgi_per90_5         underlying chance quality, the "fundamentals" behind
-                      noisy realised points (like earnings vs. price moves)
+                      noisy realised points (like earnings vs. price moves),
+                      shrunk toward a prior so tiny samples can't explode
   difficulty, is_home exposure to this period's fixture
 
 No look-ahead: every pts_/mins_/rate/xgi feature in a row only uses
@@ -46,6 +50,11 @@ OUT_PATH = DATA_DIR / "player_gw_panel.csv"
 # Points for playing 60+ minutes: the return you get just for "holding" a
 # starter, so it plays the role of the risk-free rate in the Sharpe ratio.
 RISK_FREE_PTS = 2
+
+# xGI per 90 is shrunk toward this rate as if every player had already
+# played PRIOR_MINUTES at it (about the median among players who play).
+PRIOR_XGI_PER90 = 0.15
+PRIOR_MINUTES = 270
 
 # Older seasons to stack in front of the current one (see fetch_past_seasons.py).
 PAST_SEASONS = ["2025-26"]
@@ -187,6 +196,9 @@ def add_features(gw: pd.DataFrame) -> pd.DataFrame:
         )
 
     gw["played"] = (gw["minutes"] > 0).astype(float).where(gw["minutes"].notna())
+    gw["mins_per_fixture"] = gw["minutes"] / gw["n_fixtures"]
+    # 60+ minutes earns the full appearance points.
+    gw["full_shift"] = (gw["mins_per_fixture"] >= 60).astype(float).where(gw["minutes"].notna())
 
     gw["pts_mean_3"] = lagged_rolling("total_points", 3, "mean")
     gw["pts_mean_5"] = lagged_rolling("total_points", 5, "mean")
@@ -199,15 +211,30 @@ def add_features(gw: pd.DataFrame) -> pd.DataFrame:
     gw["mins_mean_3"] = lagged_rolling("minutes", 3, "mean")
     gw["play_rate_5"] = lagged_rolling("played", 5, "mean")
     gw["start_rate_5"] = lagged_rolling("starts", 5, "mean")
+    gw["mins60_rate_5"] = lagged_rolling("full_shift", 5, "mean")
 
+    # The most recent gameweek says the most about the next team sheet.
+    gw["mins_last"] = by_player["mins_per_fixture"].shift(1)
+    gw["start_streak"] = by_player["starts"].transform(_lagged_streak)
+
+    # Shrunk toward a typical rate: 3 minutes with one big chance would
+    # otherwise read as 10+ xGI per 90 (the same idea as shrinking a noisy
+    # sample mean toward a prior).
     xgi_5 = lagged_rolling("expected_goal_involvements", 5, "sum")
     mins_5 = lagged_rolling("minutes", 5, "sum")
-    gw["xgi_per90_5"] = 90 * xgi_5 / mins_5.replace(0, np.nan)
+    gw["xgi_per90_5"] = 90 * (xgi_5 + PRIOR_XGI_PER90 * PRIOR_MINUTES / 90) / (mins_5 + PRIOR_MINUTES)
 
     gw["gws_observed"] = by_player["total_points"].transform(
         lambda s: s.shift(1).notna().cumsum()
     )
-    return gw.drop(columns=["played"])
+    return gw.drop(columns=["played", "mins_per_fixture", "full_shift"])
+
+
+def _lagged_streak(starts: pd.Series) -> pd.Series:
+    """Consecutive gameweeks with a start, up to (not including) each row."""
+    started = starts.shift(1).fillna(0).gt(0)
+    run_id = (~started).cumsum()
+    return started.astype(int).groupby(run_id).cumsum().astype(float)
 
 
 def build_panel() -> pd.DataFrame:

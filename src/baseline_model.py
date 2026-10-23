@@ -36,7 +36,8 @@ FORECAST_PATH = DATA_DIR / "forecast_next_gw.csv"
 
 NUMERIC_FEATURES = [
     "pts_mean_3", "pts_mean_5", "pts_std_5", "pts_sharpe_5", "pts_per_m_5",
-    "mins_mean_3", "play_rate_5", "start_rate_5", "xgi_per90_5",
+    "mins_mean_3", "play_rate_5", "start_rate_5", "mins60_rate_5",
+    "mins_last", "start_streak", "xgi_per90_5",
     "price_m", "difficulty", "home_share",
 ]
 POSITIONS = ["GKP", "DEF", "MID", "FWD"]
@@ -97,31 +98,36 @@ def score(gw: pd.DataFrame, col: str) -> dict:
     }
 
 
-def compare(results: pd.DataFrame) -> pd.DataFrame:
-    """Mean of each metric per method, plus a paired t-stat of model - naive.
+def compare(results: pd.DataFrame, method: str = "model", benchmark: str = "naive") -> pd.DataFrame:
+    """Mean of each metric for two methods, plus a paired t-stat of the gap.
 
     Paired by gameweek, like comparing two strategies' returns over the same
     periods: |t| above ~2 means the gap is consistent, not a few lucky weeks.
     """
     metrics = ["mae", "rmse", "ic", "ic_starters", "top20_pts"]
     wide = results.pivot(index="period", columns="method", values=metrics)
-    model = wide.xs("model", axis=1, level="method")
-    naive = wide.xs("naive", axis=1, level="method")
+    model = wide.xs(method, axis=1, level="method")
+    naive = wide.xs(benchmark, axis=1, level="method")
     diff = model - naive
     # For errors lower is better; for IC and top-20 points higher is better.
     better = diff.copy()
     better[["mae", "rmse"]] *= -1
     return pd.DataFrame({
-        "model": model.mean(),
-        "naive": naive.mean(),
+        method: model.mean(),
+        benchmark: naive.mean(),
         "diff": diff.mean(),
         "t_stat": diff.mean() / diff.std() * np.sqrt(len(diff)),
-        "model_wins": (better > 0).mean(),
+        f"{method}_wins": (better > 0).mean(),
     })
 
 
-def walk_forward(panel: pd.DataFrame, fit_predict=fit_predict) -> pd.DataFrame:
-    """Expanding-window backtest: train on periods < t, forecast period t."""
+def walk_forward(panel: pd.DataFrame, methods: dict | None = None) -> pd.DataFrame:
+    """Expanding-window backtest: train on periods < t, forecast period t.
+
+    `methods` maps a name to a fit_predict(train, test) function; the naive
+    forecast is always scored alongside as the benchmark.
+    """
+    methods = methods or {"model": fit_predict}
     played = panel[panel["total_points"].notna()]
     rows = []
     for t in sorted(played["period"].unique()):
@@ -131,11 +137,12 @@ def walk_forward(panel: pd.DataFrame, fit_predict=fit_predict) -> pd.DataFrame:
         # Score only players with some history: neither method can rank a
         # debutant, and both would just guess 0.
         test = played[(played["period"] == t) & (played["gws_observed"] > 0)].copy()
-        test["model"] = fit_predict(train, test)
+        for name, method_fit_predict in methods.items():
+            test[name] = method_fit_predict(train, test)
         test["naive"] = naive_forecast(test)
 
         season, rnd = test[["season", "round"]].iloc[0]
-        for method in ("model", "naive"):
+        for method in [*methods, "naive"]:
             rows.append({"period": t, "season": season, "round": rnd,
                          "method": method, "n": len(test), **score(test, method)})
     return pd.DataFrame(rows)
