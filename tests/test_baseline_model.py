@@ -35,7 +35,7 @@ def test_walk_forward_never_trains_on_the_future(monkeypatch):
     monkeypatch.setattr(baseline_model, "score",
                         lambda gw, col: {"mae": 0, "rmse": 0, "ic": 0, "ic_starters": 0, "top20_pts": 0})
     monkeypatch.setattr(baseline_model, "naive_forecast", lambda gw: pd.Series(0.0, index=gw.index))
-    walk_forward(panel, fit_predict=spy)
+    walk_forward(panel, methods={"model": spy})
 
     assert seen, "no gameweeks were forecast"
     assert all(train_max < test_t for train_max, test_t in seen)

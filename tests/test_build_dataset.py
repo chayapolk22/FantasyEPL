@@ -18,7 +18,7 @@ def make_matches(points_by_round, element=1, minutes=90, season="2026-27"):
 
 FEATURES = ["pts_mean_3", "pts_mean_5", "pts_std_5", "pts_sharpe_5",
             "pts_per_m_5", "mins_mean_3", "play_rate_5", "start_rate_5",
-            "xgi_per90_5", "gws_observed"]
+            "xgi_per90_5", "gws_observed", "mins60_rate_5", "mins_last", "start_streak"]
 
 
 def test_no_look_ahead():
@@ -77,3 +77,23 @@ def test_features_roll_over_seasons():
     assert gw1["pts_mean_3"] == 8
     assert gw1["gws_observed"] == 2
     assert gw1["element"] == 12
+
+
+def test_minutes_features():
+    matches = make_matches({1: 2, 2: 2, 3: 1, 4: 2, 5: 2})
+    matches.loc[matches["round"] == 3, ["minutes", "starts"]] = [20, 0]
+    gw = add_features(to_gameweeks(matches)).set_index("round")
+
+    assert gw.loc[3, "start_streak"] == 2
+    assert gw.loc[4, "start_streak"] == 0      # benched in GW3
+    assert gw.loc[5, "start_streak"] == 1
+    assert gw.loc[4, "mins_last"] == 20
+    assert gw.loc[4, "mins60_rate_5"] == 2 / 3
+
+
+def test_xgi_per90_is_shrunk_for_tiny_samples():
+    matches = make_matches({1: 2, 2: 2}, minutes=3)
+    matches["expected_goal_involvements"] = 0.5
+    gw = add_features(to_gameweeks(matches)).set_index("round")
+    # 0.5 xGI in 3 minutes is 15 per 90 unshrunk; the prior pulls it near 0.3.
+    assert gw.loc[2, "xgi_per90_5"] < 0.5
