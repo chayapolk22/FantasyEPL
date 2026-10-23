@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Raw API responses (re-create with src/fetch_history.py)
+data/raw/

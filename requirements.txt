@@ -16,6 +16,9 @@ shap
 cvxpy
 scipy
 
+# Testing
+pytest
+
 # Notebooks & viz
 jupyter
 matplotlib
